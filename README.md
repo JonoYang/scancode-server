@@ -56,7 +56,7 @@ Windows is not tested and not supported for now.
 
 - Create a local virtual environment with `virtualenv .` and activate this with `source bin/activate`
 - Install the required dependencies with `pip install -r requirements.txt`
-- Create the db schema `python manage.py makemigrations` then `python manage.py migrate`
+- Create the db schema `python manage.py migrate`
 - Create a local admin user with `python manage.py createsuperuser`
 - Run a local test server with `python manage.py runserver`
 - Run `redis-server`
