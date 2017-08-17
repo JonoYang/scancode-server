@@ -30,6 +30,11 @@ from scanapp.views import LoginView
 from scanapp.views import RegisterView
 from scanapp.views import ScanResults
 from scanapp.views import UrlScanView
+from scanapp.views import RegisterView
+from scanapp.views import LoginView
+from scanapp.views import ScanApiView
+
+from rest_framework.authtoken import views as rest_views
 
 urlpatterns = [
 
@@ -40,7 +45,6 @@ urlpatterns = [
     url(r'^login/', LoginView.as_view(), name='login'),
     url(r'^signin/', rest_views.obtain_auth_token, name='signin'),
     url(r'^signup/?', RegisterView.as_view(), name='signup'),
-    url(r'^home/', TemplateView.as_view(template_name="scanapp/home.html")),
-
-
+    url(r'^home/', TemplateView.as_view(template_name='scanapp/home.html'), name='home'),
+    url(r'^resultserializer/(?P<pk>[0-9]+)', ScanApiView.as_view(), name='resultserializer'),
 ]

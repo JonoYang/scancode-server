@@ -25,15 +25,10 @@ from __future__ import absolute_import, unicode_literals
 
 import json
 import logging
-import os
-import shutil
 import subprocess
-from datetime import datetime
-from os.path import expanduser
-from urlparse import urlparse
 
-import git
 import requests
+from django.utils import timezone
 
 from scanapp.celery import app
 from scanapp.models import Copyright
@@ -45,6 +40,8 @@ from scanapp.models import Package
 from scanapp.models import Scan
 from scanapp.models import ScanError
 from scanapp.models import ScannedFile
+
+logger = logging.getLogger(__name__)
 
 
 @app.task
@@ -63,39 +60,16 @@ def scan_code_async(url, scan_id, path, file_name):
 
 
 @app.task
-def scan_code_async_final(url, scan_id):
+def handle_special_urls(url, scan_id, path, host):
     """
-    Create and save a file at `path` present at `URL` using `scan_id` and bare `path`
-    and apply the scan.
+    Create and initialise the git repository at a certain path and clone the git repo using `url`
+    and then get the scan done.
     """
-    logger = logging.getLogger(__name__)
-    logger.info('git repo detected')
-
-    clean_url = ''.join(e for e in url if e.isalnum())
-
-    dir_name = clean_url
-
-    home_path = expanduser("~")
-
-    os.chdir(home_path)
-
-    if os.path.isdir(dir_name):
-        shutil.rmtree(dir_name)
-
-    os.mkdir(dir_name)
-
-    repo = git.Repo.init(dir_name)
-    origin = repo.create_remote('origin', url)
-    origin.fetch()
-    origin.pull(origin.refs[0].remote_head)
-
-    logger.info('Done ! Remote repository cloned')
-
-    filename = home_path + '/' + clean_url + '/'
-
-    path = filename
-
-    apply_scan_async.delay(path, scan_id)
+    if host == 'github.com':
+        logger.info('git repo detected and cloned from the host github.com')
+        subprocess.call(['git', 'clone', url, path])
+        logger.info('Done ! Remote repository cloned')
+        apply_scan_async(path, scan_id)
 
 
 @app.task
@@ -124,82 +98,76 @@ def save_results_to_db(scan_id, json_data):
         scancode_version=json_data['scancode_version'],
     )
 
-    # logic to calculate total_error
-    #    total_errors = 0
-    #    for a_file in json_data['files']:
-    #        for error in a_file['scan_errors']:
-    #            total_errors = total_errors + 1
-
-    for a_file in json_data['files']:
+    for scan_file in json_data['files']:
         scanned_file = ScannedFile(
             scan=scan,
-            path=a_file['path']
+            path=scan_file['path']
         )
         scanned_file.save()
 
-        for a_license in a_file['licenses']:
+        for scanned_license in scan_file['licenses']:
             license = License(
                 scanned_file=scanned_file,
-                key=a_license['key'],
-                score=a_license['score'],
-                short_name=a_license['short_name'],
-                category=a_license['category'],
-                owner=a_license['owner'],
-                homepage_url=a_license['homepage_url'],
-                text_url=a_license['text_url'],
-                dejacode_url=a_license['dejacode_url'],
-                spdx_license_key=a_license['spdx_license_key'],
-                spdx_url=a_license['spdx_url'],
-                start_line=a_license['start_line'],
-                end_line=a_license['end_line'],
-                matched_rule=a_license['matched_rule']
+                key=scanned_license['key'],
+                score=scanned_license['score'],
+                short_name=scanned_license['short_name'],
+                category=scanned_license['category'],
+                owner=scanned_license['owner'],
+                homepage_url=scanned_license['homepage_url'],
+                text_url=scanned_license['text_url'],
+                dejacode_url=scanned_license['dejacode_url'],
+                spdx_license_key=scanned_license['spdx_license_key'],
+                spdx_url=scanned_license['spdx_url'],
+                start_line=scanned_license['start_line'],
+                end_line=scanned_license['end_line'],
+                matched_rule=scanned_license['matched_rule']
             )
             license.save()
 
-        for a_copyright in a_file['copyrights']:
+        for scanned_copyright in scan_file['copyrights']:
             copyright = Copyright(
                 scanned_file=scanned_file,
-                start_line=a_copyright['start_line'],
-                end_line=a_copyright['end_line']
+                start_line=scanned_copyright['start_line'],
+                end_line=scanned_copyright['end_line']
             )
             copyright.save()
 
-            for copyright_holder in a_copyright['holders']:
+            for scan_copyright_holder in scanned_copyright['holders']:
                 copyright_holder = CopyrightHolder(
                     copyright=copyright,
-                    holder=copyright_holder
+                    holder=scan_copyright_holder
                 )
                 copyright_holder.save()
 
-            for copyright_statement in a_copyright['statements']:
+            for scan_copyright_statement in scanned_copyright['statements']:
                 copyright_statement = CopyrightStatement(
                     copyright=copyright,
-                    statement=copyright_statement
+                    statement=scan_copyright_statement
                 )
                 copyright_statement.save()
 
-            for copyright_author in a_copyright['authors']:
+            for scan_copyright_author in scanned_copyright['authors']:
                 copyright_author = CopyrightAuthor(
                     copyright=copyright,
-                    author=copyright_author
+                    author=scan_copyright_author
                 )
                 copyright_author.save()
 
-        for a_package in a_file['packages']:
+        for scan_package in scan_file['packages']:
             package = Package(
                 scanned_file=scanned_file,
-                package=a_package
+                package=scan_package
             )
             package.save()
 
-        for a_scan_error in a_file['scan_errors']:
+        for scanned_scan_error in scan_file['scan_errors']:
             scan_error = ScanError(
                 scanned_file=scanned_file,
-                scan_error=a_scan_error
+                scan_error=scanned_scan_error
             )
             scan_error.save()
 
-    scan.scan_end_time = datetime.now()
+    scan.scan_end_time = timezone.now()
     scan.save()
 
 

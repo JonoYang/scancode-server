@@ -26,28 +26,30 @@ import logging
 import os
 import subprocess
 
-from datetime import datetime
-from os.path import expanduser
-
 from django.contrib.auth.models import User
 from django.core.files.storage import FileSystemStorage
 from django.db import transaction
 from django.http import HttpResponse
 from django.http import HttpResponseRedirect
 from django.shortcuts import render
+from django.utils import timezone
 from django.views import View
 from django.views.generic.base import TemplateView
 from django.views.generic.edit import FormView
+from giturl import GitURL
 from rest_framework.authtoken.models import Token
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from scanapp.forms import LocalScanForm
 from scanapp.forms import UrlScanForm
 from scanapp.models import Scan
+from scanapp.serializers import AllModelSerializer
+from scanapp.serializers import AllModelSerializerHelper
 from scanapp.tasks import apply_scan_async
 from scanapp.tasks import create_scan_id
-from scanapp.tasks import parse_url
+from scanapp.tasks import handle_special_urls
 from scanapp.tasks import scan_code_async
-from scanapp.tasks import scan_code_async_final
 
 
 class LocalUploadView(FormView):
@@ -79,7 +81,7 @@ class LocalUploadView(FormView):
             path = path + str(filename)
             scan_directory = filename
             url = fs.url(filename)
-            scan_start_time = datetime.now()
+            scan_start_time = timezone.now()
             scan_id = create_scan_id(user, url, scan_directory, scan_start_time)
             apply_scan_async.delay(path, scan_id)
 
@@ -90,12 +92,16 @@ class ScanResults(TemplateView):
     template_name = 'scanapp/scanresult.html'
 
     def get(self, request, *args, **kwargs):
-        scan = Scan.objects.get(pk=kwargs['pk'])
+        scan_id = kwargs['pk']
+        scan = Scan.objects.get(pk=scan_id)
         result = 'Please wait... Your tasks are in the queue.\n Reload in 5-10 minutes'
         if scan.scan_end_time is not None:
             result = scan
 
-        return render(request, 'scanapp/scanresults.html', context={'result': result})
+        return render(request, 'scanapp/scanresults.html', context={
+            'result': result,
+            'scan_id': scan_id,
+        })
 
 
 class LoginView(TemplateView):
@@ -133,51 +139,49 @@ class UrlScanView(FormView):
         form = self.form_class(request.POST)
 
         if form.is_valid():
-            # get the URL from the form
             url = request.POST['url']
-
             logger = logging.getLogger(__name__)
 
-            if parse_url(url) == 1:
-                if (str(request.user) == 'AnonymousUser'):
-                    user = None
-                else:
-                    user = request.user
-                home_path = expanduser("~")
-                clean_url = ''.join(e for e in url if e.isalnum())
-                scan_directory = home_path + '/' + clean_url + '/'
-                scan_start_time = datetime.now()
-                scan_id = create_scan_id(user, url, scan_directory, scan_start_time)
-                logger.info('git repo detected')
-
-                scan_code_async_final(url, scan_id)
-
-                # return the response as HttpResponse
-                return HttpResponseRedirect('/resultscan/' + str(scan_id))
-
+            if request.user.is_authenticated():
+                path = '/'.join(['media', 'user', str(request.user), 'url'])
+                user = request.user
             else:
+                path = '/'.join(['media', 'AnonymousUser', 'url'])
+                user = None
 
-                # different paths for both anonymous and registered users
-                if (str(request.user) == 'AnonymousUser'):
-                    path = 'Users/rajukoushik/media/AnonymousUser/url/'
-                    user = None
-                else:
-                    path = 'Users/rajukoushik/media/user/' + str(request.user) + '/url/'
-                    user = request.user
-                scan_start_time = datetime.now()
+            scan_start_time = timezone.now()
+            git_url_parser = GitURL(url)
 
-                # logic to check how many files are already present for the scan
-                dir_list = list()
-                dir_list = os.listdir(path)
-                file_name = ''
-
-                if len(dir_list) == 0:
-                    file_name = '1'
-                else:
-                    dir_list.sort()
-                    file_name = str(1 + int(dir_list[-1]))
-
+            if git_url_parser.host == 'github.com':
+                file_name = git_url_parser.repo
                 scan_directory = file_name
                 scan_id = create_scan_id(user, url, scan_directory, scan_start_time)
+                current_scan = Scan.objects.get(pk=scan_id)
+                path = '/'.join([path, '{}'.format(current_scan.pk), file_name])
+
+                os.makedirs(path)
+
+                handle_special_urls.delay(url, scan_id, path, git_url_parser.host)
+                logger.info('git repo detected')
+            else:
+                scan_directory = None
+                scan_id = create_scan_id(user, url, scan_directory, scan_start_time)
+                current_scan = Scan.objects.get(pk=scan_id)
+                path = '/'.join([path, '{}'.format(current_scan.pk)])
+
+                os.makedirs(path)
+
+                file_name = '{}'.format(current_scan.pk)
                 scan_code_async.delay(url, scan_id, path, file_name)
-                return HttpResponseRedirect('/resultscan/' + str(scan_id))
+
+            return HttpResponseRedirect('/resultscan/' + '{}'.format(current_scan.pk))
+
+
+# API views
+class ScanApiView(APIView):
+    def get(self, request, format=None, **kwargs):
+        scan_id = kwargs['pk']
+        scan = Scan.objects.get(pk=scan_id)
+        scan_serializer = AllModelSerializerHelper(scan)
+        scan_serializer = AllModelSerializer(scan_serializer)
+        return Response(scan_serializer.data)
