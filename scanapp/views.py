@@ -21,24 +21,43 @@
 #  scancode-server is a free software code scanning tool from nexB Inc. and others.
 #  Visit https://github.com/nexB/scancode-server/ for support and download.
 
-# To store the files on the server we use this import
+import json
+import logging
+import os
+import subprocess
+
+from django.contrib.auth.models import User
 from django.core.files.storage import FileSystemStorage
+from django.db import transaction
+from django.http import HttpResponse
 from django.http import HttpResponseRedirect
 from django.shortcuts import render
+from django.utils import timezone
+from django.views import View
 from django.views.generic.base import TemplateView
 from django.views.generic.edit import FormView
+from giturl import GitURL
+from rest_framework.authtoken.models import Token
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from scanapp.forms import LocalScanForm
-from scanapp.forms import URLScanForm
-from scanapp.models import CodeInfo
-from scanapp.models import ScanInfo
-from scanapp.models import ScanResult
-from scanapp.tasks import InsertIntoDB
+from scanapp.forms import UrlScanForm
+from scanapp.models import Scan
+from scanapp.serializers import AllModelSerializer
+from scanapp.serializers import AllModelSerializerHelper
 from scanapp.tasks import apply_scan_async
+from scanapp.tasks import create_scan_id
+from scanapp.tasks import handle_special_urls
 from scanapp.tasks import scan_code_async
 
 
 class LocalUploadView(FormView):
+    """
+    Handles everything for applyig scan by uploading files from local
+    like saving files at right place, Updating database and showing
+    file upload forms
+    """
     template_name = 'scanapp/localupload.html'
     form_class = LocalScanForm
 
@@ -46,61 +65,26 @@ class LocalUploadView(FormView):
         form = self.form_class(request.POST, request.FILES)
 
         if form.is_valid():
+            if (str(request.user) == 'AnonymousUser'):
+                path = 'media/AnonymousUser/'
+                user = None
+
+            else:
+                path = 'media/user/' + str(request.user) + '/'
+                user = request.user
+
+            subprocess.call(['mkdir', '-p', path])
             f = request.FILES['upload_from_local']
-            fs = FileSystemStorage('media/AnonymousUser/')
+            fs = FileSystemStorage(path)
             filename = fs.save(f.name, f)
 
-            scan_type = 'localscan'
+            path = path + str(filename)
+            scan_directory = filename
+            url = fs.url(filename)
+            scan_start_time = timezone.now()
+            scan_id = create_scan_id(user, url, scan_directory, scan_start_time)
+            apply_scan_async.delay(path, scan_id)
 
-            # Create an Instance of InsertIntoDB
-            insert_into_db = InsertIntoDB()
-
-            # call the create_scan_id function
-            scan_id = insert_into_db.create_scan_id(scan_type)
-
-            # different paths for both anonymous and registered users
-            if (str(request.user) == 'AnonymousUser'):
-                path = 'media/AnonymousUser/' + str(filename)
-
-            else:
-                path = 'media/user/' + str(request.user) + '/' + str(filename)
-            folder_name = filename,
-            URL = None
-            # call the celery function to apply the scan
-            apply_scan_async.delay(path, scan_id, scan_type, URL, folder_name)
-
-            # return the response as HttpResponse
-            return HttpResponseRedirect('/resultscan/' + str(scan_id))
-
-
-class URLFormViewCelery(FormView):
-    template_name = 'scanapp/urlscan.html'
-    form_class = URLScanForm
-
-    def post(self, request, *args, **kwargs):
-        form = self.form_class(request.POST)
-
-        if form.is_valid():
-            # get the URL from the form
-            URL = request.POST['URL']
-
-            scan_type = 'URL'
-
-            # Create an Instance of InsertIntoDB
-            insert_into_db = InsertIntoDB()
-
-            # call the create_scan_id function
-            scan_id = insert_into_db.create_scan_id(scan_type)
-
-            # different paths for both anonymous and registered users
-            if (str(request.user) == 'AnonymousUser'):
-                path = 'media/AnonymousUser/URL/'
-
-            else:
-                path = 'media/user/' + str(request.user) + '/URL/'
-
-            scan_code_async.delay(URL, scan_id, path)
-            # return the response as HttpResponse
             return HttpResponseRedirect('/resultscan/' + str(scan_id))
 
 
@@ -108,16 +92,96 @@ class ScanResults(TemplateView):
     template_name = 'scanapp/scanresult.html'
 
     def get(self, request, *args, **kwargs):
-        # celery_scan = CeleryScan.objects.get(scan_id=kwargs['pk'])
-        scan_info = ScanInfo.objects.get(pk=kwargs['pk'])
+        scan_id = kwargs['pk']
+        scan = Scan.objects.get(pk=scan_id)
         result = 'Please wait... Your tasks are in the queue.\n Reload in 5-10 minutes'
-        if scan_info.is_complete == True:
-            code_info = CodeInfo.objects.get(scan_info=scan_info)
-            scan_result = ScanResult.objects.get(code_info=code_info)
-            result = scan_result.scanned_json_result
+        if scan.scan_end_time is not None:
+            result = scan
 
-        return render(request, 'scanapp/scanresults.html', context={'result': result})
+        return render(request, 'scanapp/scanresults.html', context={
+            'result': result,
+            'scan_id': scan_id,
+        })
 
 
-def login(request):
-    return render(request, 'scanapp/login.html')
+class LoginView(TemplateView):
+    template_name = "scanapp/login.html"
+
+
+class RegisterView(View):
+    def post(self, request):
+        if request.POST.get('password') != request.POST.get('confirm-password'):
+            return HttpResponse("Unauthorized- Password doesn't match", status=401)
+
+        with transaction.atomic():
+            user = User.objects.create_user(
+                username=request.POST.get('username'),
+                password=request.POST.get('password'),
+                email=request.POST.get('email')
+            )
+
+            user.save()
+
+        return HttpResponse(
+            json.dumps(
+                {
+                    'token': Token.objects.get(user=user).key
+                }
+            )
+        )
+
+
+class UrlScanView(FormView):
+    template_name = 'scanapp/urlscan.html'
+    form_class = UrlScanForm
+
+    def post(self, request, *args, **kwargs):
+        form = self.form_class(request.POST)
+
+        if form.is_valid():
+            url = request.POST['url']
+            logger = logging.getLogger(__name__)
+
+            if request.user.is_authenticated():
+                path = '/'.join(['media', 'user', str(request.user), 'url'])
+                user = request.user
+            else:
+                path = '/'.join(['media', 'AnonymousUser', 'url'])
+                user = None
+
+            scan_start_time = timezone.now()
+            git_url_parser = GitURL(url)
+
+            if git_url_parser.host == 'github.com':
+                file_name = git_url_parser.repo
+                scan_directory = file_name
+                scan_id = create_scan_id(user, url, scan_directory, scan_start_time)
+                current_scan = Scan.objects.get(pk=scan_id)
+                path = '/'.join([path, '{}'.format(current_scan.pk), file_name])
+
+                os.makedirs(path)
+
+                handle_special_urls.delay(url, scan_id, path, git_url_parser.host)
+                logger.info('git repo detected')
+            else:
+                scan_directory = None
+                scan_id = create_scan_id(user, url, scan_directory, scan_start_time)
+                current_scan = Scan.objects.get(pk=scan_id)
+                path = '/'.join([path, '{}'.format(current_scan.pk)])
+
+                os.makedirs(path)
+
+                file_name = '{}'.format(current_scan.pk)
+                scan_code_async.delay(url, scan_id, path, file_name)
+
+            return HttpResponseRedirect('/resultscan/' + '{}'.format(current_scan.pk))
+
+
+# API views
+class ScanApiView(APIView):
+    def get(self, request, format=None, **kwargs):
+        scan_id = kwargs['pk']
+        scan = Scan.objects.get(pk=scan_id)
+        scan_serializer = AllModelSerializerHelper(scan)
+        scan_serializer = AllModelSerializer(scan_serializer)
+        return Response(scan_serializer.data)

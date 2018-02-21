@@ -21,26 +21,47 @@
 #  scancode-server is a free software code scanning tool from nexB Inc. and others.
 #  Visit https://github.com/nexB/scancode-server/ for support and download.
 
-from django.contrib import admin
+import json
 
-# Import models from scanapp.models
+from django.contrib.auth.models import User
+from django.core.files import File
+from django.test import TestCase
+from django.utils import timezone
+
+from scanapp.tasks import apply_scan_async
+from scanapp.tasks import create_scan_id
+from scanapp.tasks import fill_unfilled_scan_model
+from scanapp.tasks import save_results_to_db
+from scanapp.tasks import scan_code_async
+
 from scanapp.models import Scan
 from scanapp.models import ScannedFile
 from scanapp.models import License
-from scanapp.models import Copyright
-from scanapp.models import CopyrightHolder
-from scanapp.models import CopyrightStatement
-from scanapp.models import CopyrightAuthor
-from scanapp.models import Package
-from scanapp.models import ScanError
 
-# Register models from scancode.models
-admin.site.register(Scan)
-admin.site.register(ScannedFile)
-admin.site.register(License)
-admin.site.register(Copyright)
-admin.site.register(CopyrightHolder)
-admin.site.register(CopyrightStatement)
-admin.site.register(CopyrightAuthor)
-admin.site.register(Package)
-admin.site.register(ScanError)
+
+class CreateScanIdTestCase(TestCase):
+    def test_create_scan_id_anonymous_user(self):
+        user = None
+        url = 'https://github.com'
+        scan_directory = 'media/url'
+        scan_start_time = timezone.now()
+        scan_id = create_scan_id(
+            user=user,
+            url=url,
+            scan_directory=scan_directory,
+            scan_start_time=scan_start_time
+        )
+        self.assertEqual(url, Scan.objects.get(pk=scan_id).url)
+
+    def test_create_scan_id_registered_user(self):
+        user = User.objects.create_user(username='username', password='password')
+        url = 'https://github.com'
+        scan_directory = 'media/user'
+        scan_start_time = timezone.now()
+        scan_id = create_scan_id(
+            user=user,
+            url=url,
+            scan_directory=scan_directory,
+            scan_start_time=scan_start_time
+        )
+        self.assertEqual(user.username, Scan.objects.get(pk=scan_id).user.username)

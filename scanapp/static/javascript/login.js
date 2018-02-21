@@ -1,6 +1,3 @@
-/**
- * Created by rajukoushik on 04/07/17.
- */
 $(function () {
     $('#login-form-link').click(function (e) {
         $("#login-form").delay(100).fadeIn(100);

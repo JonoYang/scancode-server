@@ -21,12 +21,26 @@
 #  scancode-server is a free software code scanning tool from nexB Inc. and others.
 #  Visit https://github.com/nexB/scancode-server/ for support and download.
 
-from django import forms
+from django.core.files import File
+from django.core.files.uploadedfile import InMemoryUploadedFile
+from django.test import TestCase
 
+from scanapp.forms import LocalScanForm
+from scanapp.forms import UrlScanForm
 
-class UrlScanForm(forms.Form):
-    url = forms.URLField(label='URL', max_length=2000)
-
-
-class LocalScanForm(forms.Form):
-    upload_from_local = forms.FileField(label='Upload from Local')
+class UrlScanFormTestCase(TestCase):
+    def test_correct_url_scan_form(self):
+        correct_form_data = {'url': 'https://github.com'}
+        correct_url_scan_form = UrlScanForm(data=correct_form_data)
+        self.assertTrue(correct_url_scan_form.is_valid())
+        self.assertEqual('https://github.com', correct_url_scan_form.data['url'])
+    
+    def test_wrong_url_scan_form(self):
+        wrong_form_data = {'url': 'not an URL'}
+        wrong_url_scan_form = UrlScanForm(data=wrong_form_data)
+        self.assertFalse(wrong_url_scan_form.is_valid())    
+    
+    def test_empty_url_scan_form(self):
+        empty_form_data = {'url': ''}
+        empty_url_scan_form = UrlScanForm(data=empty_form_data)
+        self.assertFalse(empty_url_scan_form.is_valid())
